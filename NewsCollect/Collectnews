@@ -1,0 +1,101 @@
+import re
+import time
+import requests
+from bs4 import BeautifulSoup
+import pandas as pd
+from urllib.parse import urljoin
+from datetime import date, datetime, timedelta
+
+# ---------- CONFIG ----------
+BASE_URL = "https://www.sharesansar.com/category/latest"
+TOKEN = "kXv0PoCD9Ioz0uZo3cjdZ5Qm6A7eoPD5168Ag9Wi"  # Replace with valid token
+OUTPUT_CSV = "sharesansar_news.csv"
+DETAIL_DELAY = 0.3  # seconds between article-page requests (be polite to the server)
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                  "AppleWebKit/537.36 (KHTML, like Gecko) "
+                  "Chrome/124.0.0.0 Safari/537.36"
+}
+
+# Matches e.g. "Mon, Nov 23, 2026 10:56 AM"
+TS_PATTERN = re.compile(r"[A-Za-z]{3}, [A-Za-z]{3} \d{1,2}, \d{4} \d{1,2}:\d{2} [AP]M")
+
+# ---------- GENERATE ALL DATES ----------
+start_date = date(2012, 1, 1)
+end_date = date(2026, 11, 22)
+delta = timedelta(days=1)
+
+all_dates = []
+current = start_date
+while current <= end_date:
+    all_dates.append(current.strftime("%Y-%m-%d"))
+    current += delta
+
+# ---------- PUBLICATION TIME (from article page) ----------
+def get_publish_datetime(article_url):
+    """Return the datetime shown on the article page (the calendar line), or None."""
+    try:
+        response = requests.get(article_url, headers=HEADERS, timeout=20)
+        soup = BeautifulSoup(response.text, "html.parser")
+        for h5 in soup.select("h5"):
+            if h5.select_one("i.fa-calendar"):
+                match = TS_PATTERN.search(h5.get_text(" ", strip=True))
+                if match:
+                    return datetime.strptime(match.group(0), "%a, %b %d, %Y %I:%M %p")
+    except requests.RequestException:
+        pass
+    return None
+
+# ---------- SCRAPER ----------
+all_data = []
+
+for date_str in all_dates:
+    next_url = f"{BASE_URL}?company=&date={date_str}&_token={TOKEN}"
+    print(f"\nScraping news for {date_str}")
+
+    while next_url:
+        response = requests.get(next_url, headers=HEADERS)
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        # ---------- SCRAPE NEWS LIST ----------
+        news_blocks = soup.select("div.featured-news-list")
+        if not news_blocks:
+            if next_url.endswith(f"date={date_str}&_token={TOKEN}"):
+                print(f"No news found for {date_str}")
+            break
+
+        for block in news_blocks:
+            try:
+                a_tag = block.select_one("div.col-md-10 a")
+                headline = a_tag.select_one("h4.featured-news-title").get_text(strip=True)
+                link = a_tag["href"]
+            except (AttributeError, KeyError, TypeError):
+                continue
+
+            # ---------- GET PUBLICATION TIME FROM ARTICLE ----------
+            pub_dt = get_publish_datetime(link)
+            time.sleep(DETAIL_DELAY)
+
+            publish_time = pub_dt.strftime("%H:%M") if pub_dt else None          # e.g. 10:56
+            published_at = pub_dt.strftime("%Y-%m-%d %H:%M:%S") if pub_dt else None  # e.g. 2026-11-23 10:56:00
+
+            all_data.append((date_str, publish_time, published_at, headline, link))
+
+        # ---------- HANDLE PAGINATION ----------
+        next_tag = soup.select_one("ul.pagination li a[rel='next']")
+        if next_tag:
+            next_url = urljoin(BASE_URL, next_tag["href"])
+        else:
+            next_url = None  # No more pages
+
+# ---------- SAVE TO CSV ----------
+if all_data:
+    df = pd.DataFrame(
+        all_data,
+        columns=["Date", "Time", "Published_At", "Headline", "Link"],
+    )
+    df.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
+    print(f"\n✅ Saved {len(all_data)} headlines to {OUTPUT_CSV}")
+else:
+    print("⚠️ No data scraped.")
